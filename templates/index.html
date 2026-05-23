@@ -320,7 +320,7 @@
       : '';
 
     // "What's new?" link in meta row for update-available cards
-    const whatsNew = (c.status === 'update' || c.status === 'deferred') && !isUpdating
+    const whatsNew = (c.status === 'update' || c.status === 'deferred') && !isUpdating && c.has_changelog
       ? `<button class="btn-link" onclick="openChangelog('${esc(c.name)}')">What's new?</button>`
       : '';
 

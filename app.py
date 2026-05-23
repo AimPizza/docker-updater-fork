@@ -135,6 +135,14 @@ def get_local_digest(container) -> str | None:
     return None
 
 
+def _has_changelog(container) -> bool:
+    try:
+        labels = (container.image.attrs.get("Config") or {}).get("Labels") or {}
+        return _github_repo_from_labels(labels) is not None
+    except Exception:
+        return False
+
+
 def is_locally_built(container) -> bool:
     try:
         return not container.image.attrs.get("RepoDigests")
@@ -313,7 +321,7 @@ def _github_repo_from_labels(labels: dict) -> str | None:
 def fetch_changelog(container_name: str) -> dict:
     client = docker.from_env()
     container = client.containers.get(container_name)
-    labels = container.image.attrs.get("Labels") or {}
+    labels = (container.image.attrs.get("Config") or {}).get("Labels") or {}
     image_name = container.attrs["Config"]["Image"]
 
     repo = _github_repo_from_labels(labels)
@@ -408,6 +416,7 @@ def api_status():
                 "checked_at": info.get("checked_at"),
                 "updating": name in _update_running,
                 "has_logs": name in _update_logs,
+                "has_changelog": _has_changelog(container),
             })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
