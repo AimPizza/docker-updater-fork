@@ -11,6 +11,7 @@ services:
       - ./data:/app/data
       - ./app.py:/app/app.py:ro
       - ./templates:/app/templates:ro
+      - ./static:/app/static:ro
     environment:
       - CHECK_TIME=03:00
       - TIMEZONE=Australia/Melbourne
