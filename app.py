@@ -247,11 +247,11 @@ def apply_update(container_name: str) -> None:
             network_mode not in SPECIAL_MODES and
             not network_mode.startswith("container:")
         )
+        hc_network_mode = "bridge" if is_custom_network else network_mode
         all_nets = {
             net_name: client.api.create_endpoint_config(aliases=net_data.get("Aliases") or [])
             for net_name, net_data in nets.items()
-        }
-        hc_network_mode = "bridge" if is_custom_network else network_mode
+        } if is_custom_network else {}
 
         hc = client.api.create_host_config(
             binds=hcfg.get("Binds") or [],
