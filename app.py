@@ -242,15 +242,21 @@ def apply_update(container_name: str) -> None:
         emit("▶ Recreating container...")
 
         network_mode = hcfg.get("NetworkMode", "bridge")
+        SPECIAL_MODES = {"host", "none", "bridge"}
+        is_custom_network = (
+            network_mode not in SPECIAL_MODES and
+            not network_mode.startswith("container:")
+        )
         all_nets = {
             net_name: client.api.create_endpoint_config(aliases=net_data.get("Aliases") or [])
             for net_name, net_data in nets.items()
         }
+        hc_network_mode = "bridge" if is_custom_network else network_mode
 
         hc = client.api.create_host_config(
             binds=hcfg.get("Binds") or [],
             port_bindings=hcfg.get("PortBindings") or {},
-            network_mode=network_mode,
+            network_mode=hc_network_mode,
             restart_policy=hcfg.get("RestartPolicy"),
             cap_add=hcfg.get("CapAdd"),
             cap_drop=hcfg.get("CapDrop"),
@@ -278,6 +284,13 @@ def apply_update(container_name: str) -> None:
             host_config=hc, networking_config=nc,
         )
         client.api.start(new_c["Id"])
+
+        if is_custom_network:
+            try:
+                client.api.disconnect_container_from_network(new_c["Id"], "bridge")
+            except Exception:
+                pass
+
         emit(f"\nSUCCESS: {container_name} updated and running.")
 
         with _state_lock:
