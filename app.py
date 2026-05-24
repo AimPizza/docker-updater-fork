@@ -201,7 +201,7 @@ def check_for_updates() -> None:
         _check_running = False
 
 
-# ── Container recreation via Docker SDK ───────────────────────────────────────
+# ── Container recreation via Docker SDK (Watchtower pattern) ──────────────────
 
 def apply_update(container_name: str) -> None:
     _update_logs[container_name] = []
@@ -215,10 +215,11 @@ def apply_update(container_name: str) -> None:
     try:
         client = docker.from_env()
         container = client.containers.get(container_name)
-        attrs      = container.attrs
-        cfg        = attrs["Config"]
-        hcfg       = attrs["HostConfig"]
-        nets       = attrs["NetworkSettings"]["Networks"]
+        old_id    = container.id
+        attrs     = container.attrs
+        cfg       = attrs["Config"]
+        hcfg      = attrs["HostConfig"]
+        nets      = attrs["NetworkSettings"]["Networks"]
         image_name = cfg["Image"]
 
         emit(f"Container : {container_name}")
@@ -242,21 +243,11 @@ def apply_update(container_name: str) -> None:
         emit("▶ Recreating container...")
 
         network_mode = hcfg.get("NetworkMode", "bridge")
-        SPECIAL_MODES = {"host", "none", "bridge"}
-        is_custom_network = (
-            network_mode not in SPECIAL_MODES and
-            not network_mode.startswith("container:")
-        )
-        hc_network_mode = "bridge" if is_custom_network else network_mode
-        all_nets = {
-            net_name: client.api.create_endpoint_config(aliases=net_data.get("Aliases") or [])
-            for net_name, net_data in nets.items()
-        } if is_custom_network else {}
 
         hc = client.api.create_host_config(
             binds=hcfg.get("Binds") or [],
             port_bindings=hcfg.get("PortBindings") or {},
-            network_mode=hc_network_mode,
+            network_mode=network_mode,
             restart_policy=hcfg.get("RestartPolicy"),
             cap_add=hcfg.get("CapAdd"),
             cap_drop=hcfg.get("CapDrop"),
@@ -272,7 +263,27 @@ def apply_update(container_name: str) -> None:
             tmpfs=hcfg.get("Tmpfs"),
         )
 
-        nc = client.api.create_networking_config(all_nets) if all_nets else None
+        # Build full network map, stripping stale container-ID aliases (Watchtower pattern)
+        short_id = old_id[:12]
+        full_nets = {
+            net_name: {
+                "aliases": [a for a in (net_data.get("Aliases") or []) if a != short_id]
+            }
+            for net_name, net_data in nets.items()
+        }
+
+        # Docker API bug: only ONE network endpoint allowed at create time
+        # https://github.com/docker/docker/issues/29265
+        simple_net_name = next(iter(full_nets), None)
+        if simple_net_name:
+            simple_nc = client.api.create_networking_config({
+                simple_net_name: client.api.create_endpoint_config(
+                    aliases=full_nets[simple_net_name]["aliases"] or None
+                )
+            })
+        else:
+            simple_nc = None
+
         new_c = client.api.create_container(
             image=image_name, name=container_name,
             hostname=cfg.get("Hostname", ""), user=cfg.get("User", ""),
@@ -281,16 +292,26 @@ def apply_update(container_name: str) -> None:
             volumes=list((cfg.get("Volumes") or {}).keys()) or None,
             working_dir=cfg.get("WorkingDir", ""),
             ports=list((cfg.get("ExposedPorts") or {}).keys()) or None,
-            host_config=hc, networking_config=nc,
+            host_config=hc, networking_config=simple_nc,
         )
+
+        # Watchtower pattern: disconnect initial network, reconnect all networks
+        # This ensures correct iptables/port-binding setup for all network types
+        if network_mode != "host" and full_nets:
+            if simple_net_name:
+                try:
+                    client.api.disconnect_container_from_network(
+                        new_c["Id"], simple_net_name, force=True
+                    )
+                except Exception:
+                    pass
+            for net_name, net_info in full_nets.items():
+                aliases = net_info["aliases"] or None
+                client.api.connect_container_to_network(
+                    net_name, new_c["Id"], aliases=aliases
+                )
+
         client.api.start(new_c["Id"])
-
-        if is_custom_network:
-            try:
-                client.api.disconnect_container_from_network(new_c["Id"], "bridge")
-            except Exception:
-                pass
-
         emit(f"\nSUCCESS: {container_name} updated and running.")
 
         with _state_lock:
