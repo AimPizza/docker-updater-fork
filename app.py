@@ -4,6 +4,8 @@ docker-updater — poll registries for image digest changes, apply updates with 
 """
 
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -19,12 +21,13 @@ app = Flask(__name__)
 
 DATA_DIR = "/app/data"
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
-CHECK_TIME = os.environ.get("CHECK_TIME", "03:00")
-TIMEZONE   = os.environ.get("TIMEZONE", "Australia/Melbourne")
-NOTIFY_URL = os.environ.get("NOTIFY_URL", "")
+CHECK_TIME             = os.environ.get("CHECK_TIME", "03:00")
+TIMEZONE               = os.environ.get("TIMEZONE", "Australia/Melbourne")
+NOTIFY_URL             = os.environ.get("NOTIFY_URL", "")
+GITHUB_WEBHOOK_SECRET  = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
 _state_lock   = threading.Lock()
-_check_lock   = threading.Lock()   # prevents concurrent digest checks
+_check_lock   = threading.Lock()
 _check_running = False
 _update_logs: dict[str, list[str]] = {}
 _update_running: set[str] = set()
@@ -154,14 +157,9 @@ def is_locally_built(container) -> bool:
 # ── Update checking ───────────────────────────────────────────────────────────
 
 def check_for_updates(notify: bool = False) -> None:
-    """Scan all running containers for digest changes.
-
-    notify=True  → send a push notification if updates are found (scheduled run only)
-    notify=False → silent scan; updates the UI state but no push (startup / manual)
-    """
     global _check_running
     if not _check_lock.acquire(blocking=False):
-        return   # another check already in progress
+        return
     _check_running = True
     print(f"[checker] Starting digest check (notify={notify})...")
     try:
@@ -270,7 +268,6 @@ def apply_update(container_name: str) -> None:
             tmpfs=hcfg.get("Tmpfs"),
         )
 
-        # Build full network map, stripping stale container-ID aliases (Watchtower pattern)
         short_id = old_id[:12]
         full_nets = {
             net_name: {
@@ -279,8 +276,6 @@ def apply_update(container_name: str) -> None:
             for net_name, net_data in nets.items()
         }
 
-        # Docker API bug: only ONE network endpoint allowed at create time
-        # https://github.com/docker/docker/issues/29265
         simple_net_name = next(iter(full_nets), None)
         if simple_net_name:
             simple_nc = client.api.create_networking_config({
@@ -302,9 +297,6 @@ def apply_update(container_name: str) -> None:
             host_config=hc, networking_config=simple_nc,
         )
 
-        # Watchtower pattern: disconnect initial network, reconnect all networks
-        # This ensures correct iptables/port-binding setup for all network types
-        # NOTE: connect_container_to_network takes (container, network) — container first
         if network_mode != "host" and full_nets:
             if simple_net_name:
                 try:
@@ -406,6 +398,86 @@ def fetch_changelog(container_name: str) -> dict:
         return {"repo": repo, "source_url": source_url, "releases": [], "error": str(e)}
 
 
+# ── GitHub webhook ────────────────────────────────────────────────────────────
+
+@app.route("/webhook/github", methods=["POST"])
+def webhook_github():
+    # Verify HMAC-SHA256 signature
+    if GITHUB_WEBHOOK_SECRET:
+        sig = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(
+            GITHUB_WEBHOOK_SECRET.encode(), request.data, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            print("[github] Rejected webhook — bad signature")
+            return jsonify({"error": "Invalid signature"}), 401
+
+    event   = request.headers.get("X-GitHub-Event", "")
+    payload = request.get_json(silent=True) or {}
+    repo    = payload.get("repository", {}).get("full_name", "unknown")
+
+    title = body = None
+
+    if event == "issues":
+        action = payload.get("action", "")
+        issue  = payload.get("issue", {})
+        if action == "opened":
+            sender = payload.get("sender", {}).get("login", "someone")
+            title  = f"🐛 New issue — {repo}"
+            body   = f"#{issue.get('number')}: {issue.get('title')}\nOpened by {sender}\n{issue.get('html_url', '')}"
+        elif action == "closed":
+            title = f"✅ Issue closed — {repo}"
+            body  = f"#{issue.get('number')}: {issue.get('title')}"
+
+    elif event == "pull_request":
+        action = payload.get("action", "")
+        pr     = payload.get("pull_request", {})
+        if action == "opened":
+            sender = payload.get("sender", {}).get("login", "someone")
+            title  = f"🔀 New PR — {repo}"
+            body   = f"#{pr.get('number')}: {pr.get('title')}\nOpened by {sender}\n{pr.get('html_url', '')}"
+        elif action == "closed" and pr.get("merged"):
+            title = f"✅ PR merged — {repo}"
+            body  = f"#{pr.get('number')}: {pr.get('title')}"
+
+    elif event == "watch":  # star
+        if payload.get("action") == "started":
+            sender = payload.get("sender", {}).get("login", "someone")
+            stars  = payload.get("repository", {}).get("stargazers_count", "?")
+            title  = f"⭐ New star — {repo}"
+            body   = f"{sender} starred the repo ({stars} total)"
+
+    elif event == "push":
+        branch = payload.get("ref", "").replace("refs/heads/", "")
+        if branch in ("main", "master"):
+            commits = payload.get("commits", [])
+            pusher  = payload.get("pusher", {}).get("name", "someone")
+            title   = f"📦 Push to {branch} — {repo}"
+            body    = f"{pusher} pushed {len(commits)} commit{'s' if len(commits) != 1 else ''}"
+            if commits:
+                body += f"\n↳ {commits[-1].get('message', '').splitlines()[0]}"
+
+    elif event == "release":
+        if payload.get("action") == "published":
+            rel   = payload.get("release", {})
+            title = f"🚀 New release — {repo}"
+            body  = f"{rel.get('tag_name', '')}: {rel.get('name', '')}\n{rel.get('html_url', '')}"
+
+    elif event == "issue_comment":
+        if payload.get("action") == "created":
+            issue   = payload.get("issue", {})
+            comment = payload.get("comment", {})
+            sender  = payload.get("sender", {}).get("login", "someone")
+            title   = f"💬 Comment — {repo}"
+            body    = f"#{issue.get('number')}: {issue.get('title')}\n{sender}: {comment.get('body', '')[:120]}"
+
+    if title and body:
+        print(f"[github] {event} → {title}")
+        send_notification(title, body)
+
+    return jsonify({"ok": True})
+
+
 # ── Flask routes ──────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -476,7 +548,6 @@ def api_status():
 
 @app.route("/api/check", methods=["POST"])
 def api_check():
-    # Manual check — silent, user is already looking at the UI
     threading.Thread(target=check_for_updates, args=(False,), daemon=True).start()
     return jsonify({"ok": True})
 
@@ -552,11 +623,13 @@ if __name__ == "__main__":
         check_for_updates, "cron",
         hour=check_hour, minute=check_minute,
         timezone=TIMEZONE,
-        kwargs={"notify": True},   # only the scheduled run sends a push notification
+        kwargs={"notify": True},
     )
     _scheduler.start()
     print(f"[scheduler] Daily check scheduled at {CHECK_TIME} {TIMEZONE}")
 
-    # Startup scan — silent, just refreshes the UI state
+    if GITHUB_WEBHOOK_SECRET:
+        print(f"[github] Webhook endpoint active at /webhook/github")
+
     threading.Thread(target=check_for_updates, args=(False,), daemon=True).start()
     app.run(host="0.0.0.0", port=9090, debug=False, threaded=True)
