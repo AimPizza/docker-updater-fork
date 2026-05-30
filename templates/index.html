@@ -240,6 +240,11 @@
       const data = await r.json();
       if (data.error) return;
       allContainers = data.containers || [];
+      // Auto-reconnect: if an update is running and log modal is closed, reopen it
+      const activeUpdate = allContainers.find(c => c.updating);
+      if (activeUpdate && !logContainerName && !document.getElementById('log-modal-overlay').classList.contains('open')) {
+        openLogModal(activeUpdate.name);
+      }
       const updatable = new Set(allContainers.filter(c => c.status === 'update').map(c => c.name));
       selectedNames.forEach(n => { if (!updatable.has(n)) selectedNames.delete(n); });
       renderAll(data);
@@ -441,8 +446,8 @@
 
   async function startUpdate(name) {
     selectedNames.delete(name);
+    openLogModal(name);  // open immediately so user sees progress from the start
     await fetch(`/api/update/${encodeURIComponent(name)}`, { method:'POST' });
-    openLogModal(name);
     fetchStatus();
   }
 
