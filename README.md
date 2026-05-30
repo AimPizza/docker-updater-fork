@@ -16,8 +16,9 @@ Instead of automatically pulling and restarting containers the moment a new imag
 - **Bulk updates** — select multiple containers and update them all at once
 - **Changelog viewer** — fetches the last 5 GitHub Releases for any image that publishes an `org.opencontainers.image.source` label
 - **Live update log** — streaming log modal shows pull progress and recreation status in real time; auto-reconnects if you refresh the page mid-update
-- **Push notifications** — ntfy, Pushover, Discord, Slack (via Apprise) when scheduled check finds updates; silent on startup and manual checks
-- **Scheduled checks** — cron-style daily check at a configurable time and timezone
+- **Push notifications** — auto-generates a private ntfy topic on first run; or bring your own Apprise URL (ntfy, Pushover, Discord, Slack, etc.)
+- **GitHub notifications** — optional webhook endpoint receives issue, PR, star, push, and release events from any of your repos and forwards them as push notifications
+- **Scheduled checks** — cron-style daily check at a configurable time and timezone; notifications only fire on the scheduled run, not on startup or manual checks
 - **Safe recreation** — recreates containers using the Python Docker SDK (Watchtower pattern), preserving all original config: volumes, ports, environment variables, networks, restart policy, capabilities, etc.
 - **Locally-built images skipped** — containers with no `RepoDigests` (built from local Dockerfiles) are automatically ignored
 - **Persistent state** — update history, deferred decisions, and last-check timestamps survive container restarts
@@ -49,7 +50,7 @@ docker run -d \
   ghcr.io/liquidguru/docker-updater:latest
 ```
 
-Then open `http://<your-host>:9292` in your browser.
+Then open `http://<your-host>:9292`. A green banner will appear showing your auto-generated ntfy topic — subscribe to it in the ntfy app to receive push notifications.
 
 ---
 
@@ -69,7 +70,10 @@ services:
     environment:
       - CHECK_TIME=03:00
       - TIMEZONE=Australia/Melbourne
-      - NOTIFY_URL=ntfy://ntfy.sh/your-topic   # optional
+      # NOTIFY_URL is optional — if omitted, a private ntfy topic is auto-generated
+      # and shown in the dashboard on first run. To use your own:
+      # - NOTIFY_URL=ntfy://ntfy.sh/your-private-topic
+      # - NOTIFY_URL=discord://webhookid/webhooktoken
       - DOCKER_HOST=unix:///var/run/docker.sock
 ```
 
@@ -83,12 +87,80 @@ Save as `docker-compose.yml`, create a `data/` directory alongside it, then run 
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `CHECK_TIME` | `03:00` | Time of day to run the scheduled digest check (HH:MM) |
+| `CHECK_TIME` | `03:00` | Time of day for the scheduled digest check (HH:MM) |
 | `TIMEZONE` | `Australia/Melbourne` | Timezone for the scheduled check — any [tz database name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) |
-| `NOTIFY_URL` | *(empty)* | [Apprise URL](https://github.com/caronc/apprise/wiki) for push notifications — e.g. `ntfy://ntfy.sh/my-topic`, `discord://...`, `slack://...` |
+| `NOTIFY_URL` | *(auto)* | [Apprise URL](https://github.com/caronc/apprise/wiki) for push notifications. If not set, a unique private ntfy.sh topic is generated automatically. |
+| `GITHUB_WEBHOOK_SECRET` | *(empty)* | Secret for verifying GitHub webhook signatures. Required if using the GitHub notifications feature. |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker socket path |
 
-Push notifications are **only sent by the scheduled check** when updates are found. Manual "Check Now" and startup scans update the UI silently.
+---
+
+## Push notifications
+
+Push notifications are **only sent by the scheduled check** when updates are found. Startup scans and manual "Check Now" are always silent — so restarting the container never floods your phone.
+
+### Auto-setup (default)
+
+If you don't set `NOTIFY_URL`, docker-updater generates a unique private topic on first run (e.g. `ntfy.sh/du-a3f8c12b`) and saves it to `data/state.json`. A green banner appears in the dashboard with a **Copy** button — just paste that topic into the ntfy app and you're done. Dismiss the banner once you've subscribed.
+
+> **Why unique topics?** ntfy.sh topics are public by default — anyone who knows a topic name can read its messages. docker-updater's auto-generated topics are random strings that aren't published anywhere, keeping your notifications private.
+
+### Custom notifications
+
+Set `NOTIFY_URL` to any [Apprise-compatible URL](https://github.com/caronc/apprise/wiki):
+
+```
+ntfy://ntfy.sh/my-private-topic
+discord://webhookid/webhooktoken
+slack://tokenA/tokenB/tokenC
+```
+
+---
+
+## GitHub notifications (optional)
+
+docker-updater can receive GitHub webhook events and forward them as push notifications — new issues, PRs, stars, pushes, and releases across all your repos.
+
+### Setup
+
+1. Add `GITHUB_WEBHOOK_SECRET` to your container with a random secret:
+   ```bash
+   openssl rand -hex 32
+   ```
+
+2. Make your docker-updater accessible from the internet (e.g. via a Cloudflare Tunnel or reverse proxy).
+
+3. Register the webhook on each GitHub repo:
+   - Go to **Settings → Webhooks → Add webhook**
+   - Payload URL: `https://your-host/webhook/github`
+   - Content type: `application/json`
+   - Secret: the value from step 1
+   - Events: choose which you want (issues, PRs, pushes, stars, releases)
+
+   Or use the GitHub API to register across all your repos at once:
+   ```bash
+   TOKEN="your-github-token"
+   SECRET="your-webhook-secret"
+   URL="https://your-host/webhook/github"
+   curl -s -X POST \
+     -H "Authorization: token $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d "{\"name\":\"web\",\"active\":true,\"events\":[\"issues\",\"pull_request\",\"watch\",\"push\",\"release\",\"issue_comment\"],\"config\":{\"url\":\"$URL\",\"content_type\":\"json\",\"secret\":\"$SECRET\"}}" \
+     https://api.github.com/repos/YOUR_USERNAME/REPO_NAME/hooks
+   ```
+
+### Supported events
+
+| Event | Notification |
+|---|---|
+| Issue opened | 🐛 New issue — repo |
+| Issue closed | ✅ Issue closed — repo |
+| PR opened | 🔀 New PR — repo |
+| PR merged | ✅ PR merged — repo |
+| Star | ⭐ New star — repo |
+| Push to main/master | 📦 Push to main — repo |
+| Release published | 🚀 New release — repo |
+| Issue comment | 💬 Comment — repo |
 
 ---
 
