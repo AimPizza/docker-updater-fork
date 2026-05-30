@@ -17,5 +17,5 @@ services:
     environment:
       - CHECK_TIME=03:00
       - TIMEZONE=Australia/Melbourne
-      - NOTIFY_URL=ntfy://ntfy.sh/liquidguru-docker
+      - NOTIFY_URL=    # optional: ntfy://ntfy.sh/your-topic or any Apprise URL
       - DOCKER_HOST=unix:///var/run/docker.sock
