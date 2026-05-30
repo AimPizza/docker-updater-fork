@@ -15,8 +15,10 @@ Instead of automatically pulling and restarting containers the moment a new imag
 - **Per-container control** — update individually, defer for 7/14/30/90 days or indefinitely, or un-defer at any time
 - **Bulk updates** — select multiple containers and update them all at once
 - **Changelog viewer** — fetches the last 5 GitHub Releases for any image that publishes an `org.opencontainers.image.source` label
-- **Live update log** — streaming log modal shows pull progress and container recreation status in real time
-- **Safe recreation** — recreates containers using the Python Docker SDK, preserving all original config: volumes, ports, environment variables, networks, restart policy, capabilities, etc.
+- **Live update log** — streaming log modal shows pull progress and recreation status in real time; auto-reconnects if you refresh the page mid-update
+- **Push notifications** — ntfy, Pushover, Discord, Slack (via Apprise) when scheduled check finds updates; silent on startup and manual checks
+- **Scheduled checks** — cron-style daily check at a configurable time and timezone
+- **Safe recreation** — recreates containers using the Python Docker SDK (Watchtower pattern), preserving all original config: volumes, ports, environment variables, networks, restart policy, capabilities, etc.
 - **Locally-built images skipped** — containers with no `RepoDigests` (built from local Dockerfiles) are automatically ignored
 - **Persistent state** — update history, deferred decisions, and last-check timestamps survive container restarts
 - **Dark UI** — tabbed dashboard: Updates / Deferred / Up to Date / Unchecked / All
@@ -43,7 +45,18 @@ mkdir -p data
 
 # Build and start
 docker build -t docker-updater .
-docker compose up -d
+docker run -d \
+  --name docker-updater \
+  --restart unless-stopped \
+  -p 9292:9090 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/app.py:/app/app.py:ro \
+  -v $(pwd)/templates:/app/templates:ro \
+  -v $(pwd)/static:/app/static:ro \
+  -e CHECK_TIME=03:00 \
+  -e TIMEZONE=Australia/Melbourne \
+  docker-updater:latest
 ```
 
 Then open `http://<your-host>:9292` in your browser.
@@ -63,14 +76,17 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
-      - ./app.py:/app/app.py:ro          # optional: live-edit without rebuild
-      - ./templates:/app/templates:ro    # optional: live-edit without rebuild
+      - ./app.py:/app/app.py:ro
+      - ./templates:/app/templates:ro
+      - ./static:/app/static:ro
     environment:
-      - CHECK_INTERVAL_HOURS=12
+      - CHECK_TIME=03:00
+      - TIMEZONE=Australia/Melbourne
+      - NOTIFY_URL=ntfy://ntfy.sh/your-topic   # optional
       - DOCKER_HOST=unix:///var/run/docker.sock
 ```
 
-> **Port note:** The container listens internally on port 9090. The host binding `9292:9090` avoids clashing with Prometheus, which commonly uses 9090. Change the host-side port to whatever suits your setup.
+> **Port note:** The container listens internally on port 9090. The host binding `9292:9090` avoids clashing with Prometheus, which commonly uses 9090.
 
 ---
 
@@ -78,22 +94,26 @@ services:
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `CHECK_INTERVAL_HOURS` | `12` | How often to poll registries for digest changes |
+| `CHECK_TIME` | `03:00` | Time of day to run the scheduled digest check (HH:MM) |
+| `TIMEZONE` | `Australia/Melbourne` | Timezone for the scheduled check |
+| `NOTIFY_URL` | *(empty)* | [Apprise URL](https://github.com/caronc/apprise/wiki) for push notifications — e.g. `ntfy://ntfy.sh/my-topic`, `discord://...`, `slack://...` |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker socket path |
 
-A manual **Check Now** button is also available in the UI.
+Push notifications are **only sent by the scheduled check** when updates are found. Manual "Check Now" and startup scans update the UI silently.
 
 ---
 
 ## How it works
 
-1. On startup (and every `CHECK_INTERVAL_HOURS`), docker-updater iterates all running containers
+1. On startup (silently) and at the configured `CHECK_TIME`, docker-updater iterates all running containers
 2. For each container it extracts the local image digest from `RepoDigests`
 3. It sends a `HEAD` request to the registry for the image's manifest, reading the `Docker-Content-Digest` response header — no image data is transferred
 4. If the digests differ, the container is flagged as having an update available
 5. When you click **Update**, the app:
    - Pulls the new image (streaming progress to the log modal)
    - Stops and removes the old container
-   - Recreates it with identical config using the Docker SDK low-level API
+   - Recreates it with identical config using the Docker SDK low-level API (Watchtower pattern)
+   - Reconnects all networks via `NetworkConnect` to ensure correct port binding and iptables setup
    - Starts the new container
 
 Container state (update availability, defer decisions, history) is persisted to `data/state.json`.
@@ -125,9 +145,5 @@ docker rm watchtower
 - **Named volumes**: Preserved automatically — volume mounts are read from the container's `HostConfig.Binds` and reattached on recreation.
 - **Locally-built images**: Any container whose image has no `RepoDigests` is skipped (these can't be compared against a registry).
 - **Private registries**: Currently supports anonymous and Bearer-token registries. Basic auth (username/password) registries are not yet supported.
-
----
-
-## License
-
-MIT
+- **Breaking changes in new versions**: docker-updater preserves the environment variables your container was *running with*, but cannot detect when a new image version introduces *new required* environment variables. If an update fails with an application-level error after recreation, check the image's release notes for new required env vars (example: Homarr added `SECRET_ENCRYPTION_KEY` in a recent release).
+- **host network mode**: Containers using `--network host` are recreated correctly; the network reconnect step is skipped for these.
