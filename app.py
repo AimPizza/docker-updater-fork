@@ -23,7 +23,8 @@ CHECK_TIME = os.environ.get("CHECK_TIME", "03:00")
 TIMEZONE   = os.environ.get("TIMEZONE", "Australia/Melbourne")
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "")
 
-_state_lock = threading.Lock()
+_state_lock   = threading.Lock()
+_check_lock   = threading.Lock()   # prevents concurrent digest checks
 _check_running = False
 _update_logs: dict[str, list[str]] = {}
 _update_running: set[str] = set()
@@ -152,12 +153,17 @@ def is_locally_built(container) -> bool:
 
 # ── Update checking ───────────────────────────────────────────────────────────
 
-def check_for_updates() -> None:
+def check_for_updates(notify: bool = False) -> None:
+    """Scan all running containers for digest changes.
+
+    notify=True  → send a push notification if updates are found (scheduled run only)
+    notify=False → silent scan; updates the UI state but no push (startup / manual)
+    """
     global _check_running
-    if _check_running:
-        return
+    if not _check_lock.acquire(blocking=False):
+        return   # another check already in progress
     _check_running = True
-    print("[checker] Starting digest check...")
+    print(f"[checker] Starting digest check (notify={notify})...")
     try:
         client = docker.from_env()
         available: dict = {}
@@ -189,7 +195,7 @@ def check_for_updates() -> None:
         count = len(updates)
         print(f"[checker] Done — {count} update(s) available.")
 
-        if count > 0:
+        if notify and count > 0:
             send_notification(
                 title=f"Docker: {count} update{'s' if count > 1 else ''} available",
                 body=", ".join(sorted(updates)),
@@ -199,6 +205,7 @@ def check_for_updates() -> None:
         print(f"[checker] Fatal error: {e}")
     finally:
         _check_running = False
+        _check_lock.release()
 
 
 # ── Container recreation via Docker SDK (Watchtower pattern) ──────────────────
@@ -469,7 +476,8 @@ def api_status():
 
 @app.route("/api/check", methods=["POST"])
 def api_check():
-    threading.Thread(target=check_for_updates, daemon=True).start()
+    # Manual check — silent, user is already looking at the UI
+    threading.Thread(target=check_for_updates, args=(False,), daemon=True).start()
     return jsonify({"ok": True})
 
 
@@ -544,9 +552,11 @@ if __name__ == "__main__":
         check_for_updates, "cron",
         hour=check_hour, minute=check_minute,
         timezone=TIMEZONE,
+        kwargs={"notify": True},   # only the scheduled run sends a push notification
     )
     _scheduler.start()
     print(f"[scheduler] Daily check scheduled at {CHECK_TIME} {TIMEZONE}")
 
-    threading.Thread(target=check_for_updates, daemon=True).start()
+    # Startup scan — silent, just refreshes the UI state
+    threading.Thread(target=check_for_updates, args=(False,), daemon=True).start()
     app.run(host="0.0.0.0", port=9090, debug=False, threaded=True)
