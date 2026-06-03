@@ -35,6 +35,7 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
 _state_lock    = threading.Lock()
 _check_lock    = threading.Lock()
+_logs_lock     = threading.Lock()   # guards _update_logs and _update_running
 _check_running = False
 _update_logs: dict[str, list[str]] = {}
 _update_running: set[str] = set()
@@ -345,8 +346,9 @@ def check_for_updates(notify: bool = False) -> None:
 
 def apply_update(container_name: str, host_id: str = "local") -> None:
     key = _container_key(container_name, host_id)
-    _update_logs[key] = []
-    _update_running.add(key)
+    with _logs_lock:
+        _update_logs[key] = []
+        _update_running.add(key)
     log = _update_logs[key]
 
     image_name = "?"  # will be overwritten once container config is read
@@ -392,15 +394,20 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
 
         emit("\n▶ Stopping old container...")
         container.stop(timeout=30)
-        emit("▶ Removing old container...")
-        container.remove()
-        # Wait for removal to complete (large containers can get stuck)
-        for _wait in range(30):
-            try:
-                client.containers.get(container_name)
-                time.sleep(1)
-            except docker.errors.NotFound:
-                break
+
+        # Remove any stale _old container left by a previous failed rollback
+        old_name = f"{container_name}_old"
+        try:
+            stale = client.containers.get(old_name)
+            emit(f"  Removing stale {old_name} from previous failed update...")
+            stale.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+
+        emit("▶ Renaming old container (kept for rollback)...")
+        container.rename(old_name)
+        old_container = client.containers.get(old_name)
+
         emit("▶ Recreating container...")
 
         network_mode = hcfg.get("NetworkMode", "bridge")
@@ -435,30 +442,67 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
                 )
             })
 
-        new_c = client.api.create_container(
-            image=image_name, name=container_name,
-            hostname=cfg.get("Hostname", ""), user=cfg.get("User", ""),
-            detach=True, environment=cfg.get("Env"), command=cfg.get("Cmd"),
-            entrypoint=cfg.get("Entrypoint"), labels=cfg.get("Labels"),
-            volumes=list((cfg.get("Volumes") or {}).keys()) or None,
-            working_dir=cfg.get("WorkingDir", ""),
-            ports=list((cfg.get("ExposedPorts") or {}).keys()) or None,
-            host_config=hc, networking_config=simple_nc,
-        )
+        # ── Recreation with rollback ──────────────────────────────────────────
+        new_c = None
+        try:
+            new_c = client.api.create_container(
+                image=image_name, name=container_name,
+                hostname=cfg.get("Hostname", ""), user=cfg.get("User", ""),
+                detach=True, environment=cfg.get("Env"), command=cfg.get("Cmd"),
+                entrypoint=cfg.get("Entrypoint"), labels=cfg.get("Labels"),
+                volumes=list((cfg.get("Volumes") or {}).keys()) or None,
+                working_dir=cfg.get("WorkingDir", ""),
+                ports=list((cfg.get("ExposedPorts") or {}).keys()) or None,
+                host_config=hc, networking_config=simple_nc,
+            )
 
-        if network_mode != "host" and full_nets:
-            if simple_net_name:
-                try:
-                    client.api.disconnect_container_from_network(
-                        new_c["Id"], simple_net_name, force=True)
-                except Exception:
-                    pass
-            for net_name, net_info in full_nets.items():
-                client.api.connect_container_to_network(
-                    new_c["Id"], net_name, aliases=net_info["aliases"] or None)
+            if network_mode != "host" and full_nets:
+                if simple_net_name:
+                    try:
+                        client.api.disconnect_container_from_network(
+                            new_c["Id"], simple_net_name, force=True)
+                    except Exception:
+                        pass
+                for net_name, net_info in full_nets.items():
+                    client.api.connect_container_to_network(
+                        new_c["Id"], net_name, aliases=net_info["aliases"] or None)
 
-        client.api.start(new_c["Id"])
-        emit(f"\nSUCCESS: {container_name} updated and running.")
+            client.api.start(new_c["Id"])
+
+            # Verify the new container actually stayed up
+            time.sleep(2)
+            started = client.containers.get(container_name)
+            if started.status not in ("running", "restarting"):
+                raise RuntimeError(
+                    f"New container exited immediately (status={started.status}). "
+                    "Check logs for startup errors."
+                )
+
+            emit("▶ Removing old container...")
+            old_container.remove()
+            emit(f"\nSUCCESS: {container_name} updated and running.")
+
+        except Exception as recreate_err:
+            emit(f"\nERROR during recreation: {recreate_err}")
+            emit("▶ Rolling back to previous container...")
+            try:
+                # Remove the failed new container if it was created
+                if new_c is not None:
+                    try:
+                        failed = client.containers.get(container_name)
+                        failed.stop(timeout=10)
+                        failed.remove()
+                    except Exception:
+                        pass
+                # Rename _old back to original name and restart
+                old_container.rename(container_name)
+                old_container.start()
+                emit("  Rollback successful — previous container restored.")
+            except Exception as rb_err:
+                emit(f"  Rollback failed: {rb_err}")
+                emit(f"  Manual intervention required: check container '{old_name}'")
+            raise recreate_err
+        # ── End rollback block ────────────────────────────────────────────────
 
         history_entry = {
             "container": container_name, "image": image_name,
@@ -498,7 +542,8 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
             hs["history"] = hs["history"][:50]
             save_host_state(host_id, hs)
     finally:
-        _update_running.discard(key)
+        with _logs_lock:
+            _update_running.discard(key)
 
 
 # ── Changelog ─────────────────────────────────────────────────────────────────
@@ -667,12 +712,15 @@ def api_status():
             else:
                 status = "unknown"
             key = name  # local uses plain name
+            with _logs_lock:
+                is_updating = key in _update_running
+                has_logs    = key in _update_logs
             containers.append({
                 "name": name, "image": image_name, "status": status,
                 "defer_until": defer.get("until") if is_deferred else None,
                 "checked_at": info.get("checked_at"),
-                "updating": key in _update_running,
-                "has_logs": key in _update_logs,
+                "updating": is_updating,
+                "has_logs": has_logs,
                 "has_changelog": _has_changelog(container),
                 "host_id": "local", "host_name": "Local",
             })
@@ -717,13 +765,16 @@ def api_status():
             else:
                 cstatus = "ok"
             key = _container_key(cname, host_id)
+            with _logs_lock:
+                is_updating = key in _update_running
+                has_logs    = key in _update_logs
             containers.append({
                 "name": cname, "image": cinfo.get("image", ""),
                 "status": cstatus,
                 "defer_until": defer.get("until") if is_deferred_c else None,
                 "checked_at": cinfo.get("checked_at"),
-                "updating": key in _update_running,
-                "has_logs": key in _update_logs,
+                "updating": is_updating,
+                "has_logs": has_logs,
                 "has_changelog": False,
                 "host_id": host_id, "host_name": host_name,
             })
@@ -760,8 +811,9 @@ def api_check():
 def api_update(name):
     host_id = request.args.get("host", "local")
     key = _container_key(name, host_id)
-    if key in _update_running:
-        return jsonify({"error": "Already updating"}), 409
+    with _logs_lock:
+        if key in _update_running:
+            return jsonify({"error": "Already updating"}), 409
     threading.Thread(target=apply_update, args=(name, host_id), daemon=True).start()
     return jsonify({"ok": True})
 
@@ -803,9 +855,9 @@ def api_undefer(name):
 def api_logs(name):
     host_id = request.args.get("host", "local")
     key     = _container_key(name, host_id)
-    # backwards compat: also check plain name for existing local logs
-    logs    = _update_logs.get(key) or _update_logs.get(name, [])
-    running = key in _update_running or name in _update_running
+    with _logs_lock:
+        logs    = list(_update_logs.get(key) or _update_logs.get(name, []))
+        running = key in _update_running or name in _update_running
     return jsonify({"logs": logs, "running": running})
 
 
