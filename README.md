@@ -2,7 +2,7 @@
 
 A lightweight self-hosted web UI for managing Docker container updates — a manual-approval alternative to Watchtower.
 
-Instead of automatically pulling and restarting containers the moment a new image is published, docker-updater polls your registries on a schedule, shows you what's available, and lets you decide when (or whether) to update each container. You can also view release changelogs from GitHub before committing to an update.
+Instead of automatically pulling and restarting containers the moment a new image is published, docker-updater polls your registries on a schedule, shows you what's available, and lets you decide when (or whether) to update each container. Updates are performed with a built-in rollback safety net — the old container is kept and can be automatically restored if the new one fails to start. You can also view release changelogs from GitHub before committing to an update.
 
 ---
 
