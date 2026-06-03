@@ -438,10 +438,18 @@
       const ok = h.status === 'success';
       const hostLabel = multiHost && h.host_id && h.host_id !== 'local'
         ? `<span class="host-chip" style="margin-left:4px">${esc(h.host_id)}</span>` : '';
+      const isRunning = ok && allContainers.some(c =>
+        c.name === h.container && c.host_id === (h.host_id || 'local'));
+      const runDot = ok
+        ? (isRunning
+            ? '<span style="color:var(--green);font-size:10px;white-space:nowrap">● running</span>'
+            : '<span style="color:var(--red);font-size:10px;white-space:nowrap">● stopped</span>')
+        : '';
       return `<div class="history-item">
         <span class="${ok ? 'history-status-success' : 'history-status-error'}">${ok ? '✅' : '❌'}</span>
         <span class="history-name">${esc(h.container)}${hostLabel}</span>
         <span class="history-image">${esc(h.image)}</span>
+        ${runDot}
         <span class="history-time">${timeAgo(h.updated_at)}</span>
       </div>`;
     }).join('');

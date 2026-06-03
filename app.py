@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import threading
+import time
 
 import apprise
 import docker
@@ -348,6 +349,8 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
     _update_running.add(key)
     log = _update_logs[key]
 
+    image_name = "?"  # will be overwritten once container config is read
+
     def emit(line: str) -> None:
         print(f"[update:{host_id}:{container_name}] {line}")
         log.append(line)
@@ -370,7 +373,7 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
         cfg         = attrs["Config"]
         hcfg        = attrs["HostConfig"]
         nets        = attrs["NetworkSettings"]["Networks"]
-        image_name  = cfg["Image"]
+        image_name  = cfg.get("Image", "?")
 
         emit(f"Container : {container_name}")
         emit(f"Host      : {host_id}")
@@ -391,6 +394,13 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
         container.stop(timeout=30)
         emit("▶ Removing old container...")
         container.remove()
+        # Wait for removal to complete (large containers can get stuck)
+        for _wait in range(30):
+            try:
+                client.containers.get(container_name)
+                time.sleep(1)
+            except docker.errors.NotFound:
+                break
         emit("▶ Recreating container...")
 
         network_mode = hcfg.get("NetworkMode", "bridge")
@@ -472,7 +482,7 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
     except Exception as e:
         emit(f"\nERROR: {e}")
         history_entry = {
-            "container": container_name, "image": "?",
+            "container": container_name, "image": image_name,
             "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
             "status": f"error: {e}", "host_id": host_id,
         }
