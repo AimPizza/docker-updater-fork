@@ -90,7 +90,7 @@
   .history-item { display:flex; align-items:center; gap:8px; padding:7px 12px; background:var(--surface); border:1px solid var(--border); border-radius:6px; font-size:13px; }
   .history-name { font-weight:500; flex:1; min-width:0; }
   .history-image { font-family:monospace; font-size:11px; color:var(--muted); flex:2; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .history-time { font-size:11px; color:var(--muted); white-space:nowrap; }
+  .history-time { font-size:11px; color:var(--muted); white-space:nowrap; width:62px; text-align:right; flex-shrink:0; }
   .history-status-success { color:var(--green); }
   .history-status-error   { color:var(--red); }
 
@@ -438,17 +438,17 @@
       const ok = h.status === 'success';
       const hostLabel = multiHost && h.host_id && h.host_id !== 'local'
         ? `<span class="host-chip" style="margin-left:4px">${esc(h.host_id)}</span>` : '';
-      const isRunning = ok && allContainers.some(c =>
+      const runningContainer = allContainers.find(c =>
         c.name === h.container && c.host_id === (h.host_id || 'local'));
-      const runDot = ok
-        ? (isRunning
-            ? '<span style="color:var(--green);font-size:10px;white-space:nowrap">● running</span>'
-            : '<span style="color:var(--red);font-size:10px;white-space:nowrap">● stopped</span>')
-        : '';
+      const isRunning = !!runningContainer;
+      const isUpToDate = isRunning && runningContainer.status === 'ok';
+      const runDot = isRunning
+        ? '<span style="color:var(--green);font-size:10px;white-space:nowrap;width:56px;display:inline-block;text-align:right">● running</span>'
+        : '<span style="color:var(--red);font-size:10px;white-space:nowrap;width:56px;display:inline-block;text-align:right">● stopped</span>';
       return `<div class="history-item">
-        <span class="${ok ? 'history-status-success' : 'history-status-error'}">${ok ? '✅' : '❌'}</span>
+        <span class="${ok || (isRunning && isUpToDate) ? 'history-status-success' : (isRunning ? '' : 'history-status-error')}">${ok || (isRunning && isUpToDate) ? '✅' : (isRunning ? '⚠️' : '❌')}</span>
         <span class="history-name">${esc(h.container)}${hostLabel}</span>
-        <span class="history-image">${esc(h.image)}</span>
+        <span class="history-image">${esc(h.image === '?' && runningContainer ? runningContainer.image : h.image)}</span>
         ${runDot}
         <span class="history-time">${timeAgo(h.updated_at)}</span>
       </div>`;
