@@ -12,17 +12,19 @@ Instead of automatically pulling and restarting containers the moment a new imag
 
 - **Registry polling** — compares local image digests against the registry without pulling, using the Docker Registry v2 manifest API (`HEAD` + `Docker-Content-Digest`)
 - **Multi-registry support** — Docker Hub, GHCR (`ghcr.io`), LinuxServer (`lscr.io`), and any registry that implements the Bearer token challenge
+- **Multi-host support** — manage containers across multiple Docker hosts (SSH or TCP) from a single dashboard; each host has a connection health indicator and containers are shown together with a host chip
 - **Per-container control** — update individually, defer for 7/14/30/90 days or indefinitely, or un-defer at any time
 - **Bulk updates** — select multiple containers and update them all at once
 - **Changelog viewer** — fetches the last 5 GitHub Releases for any image that publishes an `org.opencontainers.image.source` label
 - **Live update log** — streaming log modal shows pull progress and recreation status in real time; auto-reconnects if you refresh the page mid-update
+- **Smart history icons** — recent updates show ✅ (succeeded or running & up-to-date), ⚠️ (errored but container still running), or ❌ (errored and stopped), with a `● running / ● stopped` dot for every row
 - **Push notifications** — auto-generates a private ntfy topic on first run; or bring your own Apprise URL (ntfy, Pushover, Discord, Slack, etc.)
 - **GitHub notifications** — optional webhook endpoint receives issue, PR, star, push, and release events from any of your repos and forwards them as push notifications
 - **Scheduled checks** — cron-style daily check at a configurable time and timezone; notifications only fire on the scheduled run, not on startup or manual checks
 - **Safe recreation** — recreates containers using the Python Docker SDK (Watchtower pattern), preserving all original config: volumes, ports, environment variables, networks, restart policy, capabilities, etc.
 - **Locally-built images skipped** — containers with no `RepoDigests` (built from local Dockerfiles) are automatically ignored
 - **Persistent state** — update history, deferred decisions, and last-check timestamps survive container restarts
-- **Dark UI** — tabbed dashboard: Updates / Deferred / Up to Date / Unchecked / All
+- **Dark UI** — tabbed dashboard: Updates / Deferred / Up to Date / Unchecked / All / Hosts
 
 ---
 
@@ -92,6 +94,29 @@ Save as `docker-compose.yml`, create a `data/` directory alongside it, then run 
 | `NOTIFY_URL` | *(auto)* | [Apprise URL](https://github.com/caronc/apprise/wiki) for push notifications. If not set, a unique private ntfy.sh topic is generated automatically. |
 | `GITHUB_WEBHOOK_SECRET` | *(empty)* | Secret for verifying GitHub webhook signatures. Required if using the GitHub notifications feature. |
 | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker socket path |
+
+---
+
+## Multi-host support
+
+docker-updater can manage containers on multiple Docker hosts from a single dashboard. Click the **Hosts** tab to add remote hosts.
+
+### Supported connection types
+
+| URL format | Notes |
+|---|---|
+| `ssh://user@host` | SSH — uses your system's SSH config/keys |
+| `ssh://user@host:port` | SSH on a non-standard port |
+| `tcp://host:2376` | TCP — enable Docker's remote API on the remote host |
+
+### Adding a host
+
+1. Open the **Hosts** tab
+2. Enter a name and the Docker URL
+3. Click **Test Connection** to verify before saving
+4. Click **Add Host** — a check runs immediately
+
+All containers from all hosts then appear together in the Updates/Deferred/Up to Date/etc. tabs, each with a small host chip. The Hosts tab shows connection health and last-check time for each host.
 
 ---
 
@@ -172,7 +197,7 @@ docker-updater can receive GitHub webhook events and forward them as push notifi
 4. If the digests differ, the container is flagged as having an update available
 5. When you click **Update**, the app:
    - Pulls the new image (streaming progress to the log modal)
-   - Stops and removes the old container
+   - Stops and removes the old container, waiting up to 30 seconds for Docker to confirm removal (handles slow cleanup of large images)
    - Recreates it with identical config using the Docker SDK low-level API (Watchtower pattern)
    - Reconnects all networks via `NetworkConnect` to ensure correct port binding and iptables setup
    - Starts the new container
