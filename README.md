@@ -6,7 +6,11 @@ Instead of automatically pulling and restarting containers the moment a new imag
 
 ---
 
-![docker-updater dashboard](screenshot.jpeg)
+![Updates tab — pending updates with bulk select](screenshot-updates.jpeg)
+
+![Bulk update in progress — multiple containers updating simultaneously, log viewer available per container](screenshot-updating.jpeg)
+
+![Hosts tab — multi-host management](screenshot-hosts.jpeg)
 
 ## Features
 
