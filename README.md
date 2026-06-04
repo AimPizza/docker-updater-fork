@@ -21,7 +21,7 @@ Instead of automatically pulling and restarting containers the moment a new imag
 - **Push notifications** — auto-generates a private ntfy topic on first run; or bring your own Apprise URL (ntfy, Pushover, Discord, Slack, etc.)
 - **GitHub notifications** — optional webhook endpoint receives issue, PR, star, push, and release events from any of your repos and forwards them as push notifications
 - **Scheduled checks** — cron-style daily check at a configurable time and timezone; notifications only fire on the scheduled run, not on startup or manual checks
-- **Safe recreation** — recreates containers using the Python Docker SDK (Watchtower pattern), preserving all original config: volumes, ports, environment variables, networks, restart policy, capabilities, etc.
+- **Safe recreation** — recreates containers using the Python Docker SDK (Watchtower pattern), preserving all original config: volumes, ports, environment variables, networks, static IPs, restart policy, capabilities, etc.
 - **Locally-built images skipped** — containers with no `RepoDigests` (built from local Dockerfiles) are automatically ignored
 - **Persistent state** — update history, deferred decisions, and last-check timestamps survive container restarts
 - **Dark UI** — tabbed dashboard: Updates / Deferred / Up to Date / Unchecked / All / Hosts
@@ -199,7 +199,7 @@ docker-updater can receive GitHub webhook events and forward them as push notifi
    - Pulls the new image (streaming progress to the log modal)
    - Stops the old container and renames it to `{name}_old` (kept as a rollback target)
    - Creates and starts the new container with identical config using the Docker SDK low-level API (Watchtower pattern)
-   - Reconnects all networks via `NetworkConnect` to ensure correct port binding and iptables setup
+   - Reconnects all networks via `NetworkConnect`, preserving static IP assignments, aliases, and iptables setup
    - Waits 2 seconds and checks the new container is still running
    - **On success**: removes the `_old` container
    - **On failure**: removes the failed new container, renames `_old` back, and restarts the previous version
