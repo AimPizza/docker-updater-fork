@@ -283,13 +283,6 @@
         document.getElementById('notify-banner').classList.add('visible');
       }
 
-      // Auto-reconnect log modal if an update is running
-      const activeUpdate = allContainers.find(c => c.updating);
-      if (activeUpdate && !logTarget &&
-          !document.getElementById('log-modal-overlay').classList.contains('open')) {
-        openLogModal(activeUpdate.name, activeUpdate.host_id);
-      }
-
       const updatable = new Set(
         allContainers.filter(c => c.status === 'update').map(c => `${c.host_id}:${c.name}`)
       );
@@ -626,7 +619,6 @@
   async function startUpdate(name, hostId = 'local') {
     const selKey = `${hostId}:${name}`;
     selectedNames.delete(selKey);
-    openLogModal(name, hostId);
     await fetch(`/api/update/${encodeURIComponent(name)}?host=${encodeURIComponent(hostId)}`, {method:'POST'});
     fetchStatus();
   }
