@@ -428,7 +428,9 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
         short_id = old_id[:12]
         full_nets = {
             net_name: {
-                "aliases": [a for a in (net_data.get("Aliases") or []) if a != short_id]
+                "aliases": [a for a in (net_data.get("Aliases") or []) if a != short_id],
+                "ipv4_address": (net_data.get("IPAMConfig") or {}).get("IPv4Address") or None,
+                "ipv6_address": (net_data.get("IPAMConfig") or {}).get("IPv6Address") or None,
             }
             for net_name, net_data in nets.items()
         }
@@ -438,7 +440,9 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
         if simple_net_name:
             simple_nc = client.api.create_networking_config({
                 simple_net_name: client.api.create_endpoint_config(
-                    aliases=full_nets[simple_net_name]["aliases"] or None
+                    aliases=full_nets[simple_net_name]["aliases"] or None,
+                    ipv4_address=full_nets[simple_net_name]["ipv4_address"],
+                    ipv6_address=full_nets[simple_net_name]["ipv6_address"],
                 )
             })
 
@@ -465,7 +469,11 @@ def apply_update(container_name: str, host_id: str = "local") -> None:
                         pass
                 for net_name, net_info in full_nets.items():
                     client.api.connect_container_to_network(
-                        new_c["Id"], net_name, aliases=net_info["aliases"] or None)
+                        new_c["Id"], net_name,
+                        aliases=net_info["aliases"] or None,
+                        ipv4_address=net_info["ipv4_address"],
+                        ipv6_address=net_info["ipv6_address"],
+                    )
 
             client.api.start(new_c["Id"])
 
